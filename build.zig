@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const obj_descriptor = @import("src/obj_descriptor.zig");
+pub const ObjBinaryDescriptor = obj_descriptor.ObjBinaryDescriptor;
+pub const DefaultObjBinaryDescriptor = obj_descriptor.DefaultObjBinaryDescriptor;
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -40,6 +44,10 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+
+    const assets_manager_dep = b.dependency("assets_manager", .{});
+    const assets_manager_mod = assets_manager_dep.module("assets_manager");
+    mod.addImport("assets_manager", assets_manager_mod);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
