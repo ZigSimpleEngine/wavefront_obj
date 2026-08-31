@@ -163,6 +163,10 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
     var current_obj_idx: ?usize = null;
     // Current smoothing group for face normals when vn is absent (-1 = flat/off).
     var current_group: i32 = -1;
+    // Track per-object vertex start indices so pure-v objects can be turned
+    // into Point clouds using only their own slice of `data.positions`.
+    var objVertexStarts: std.ArrayList(usize) = .empty;
+    defer objVertexStarts.deinit(gpa);
     while (lines.next()) |raw_line| {
         var line = std.mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
@@ -178,6 +182,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             const name = if (name_raw.len == 0) "default" else name_raw;
             const name_copy = try gpa.dupe(u8, name);
             try objects_out.append(gpa, .{ .name = name_copy });
+            try objVertexStarts.append(gpa, data.positions.items.len);
             current_obj_idx = objects_out.items.len - 1;
         } else if (std.mem.startsWith(u8, line, "g ")) {
             if (current_obj_idx == null) {
@@ -185,6 +190,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
                 const name = if (name_raw.len == 0) "default" else name_raw;
                 const name_copy = try gpa.dupe(u8, name);
                 try objects_out.append(gpa, .{ .name = name_copy });
+                try objVertexStarts.append(gpa, data.positions.items.len);
                 current_obj_idx = objects_out.items.len - 1;
             }
         } else if (std.mem.startsWith(u8, line, "v ")) {
@@ -252,6 +258,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             if (current_obj_idx == null) {
                 const name_copy = try gpa.dupe(u8, "default");
                 try objects_out.append(gpa, .{ .name = name_copy });
+                try objVertexStarts.append(gpa, data.positions.items.len);
                 current_obj_idx = objects_out.items.len - 1;
             }
             const obj = &objects_out.items[current_obj_idx.?];
@@ -330,6 +337,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             if (current_obj_idx == null) {
                 const name_copy = try gpa.dupe(u8, "default");
                 try objects_out.append(gpa, .{ .name = name_copy });
+                try objVertexStarts.append(gpa, data.positions.items.len);
                 current_obj_idx = objects_out.items.len - 1;
             }
             const obj = &objects_out.items[current_obj_idx.?];
@@ -362,6 +370,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             if (current_obj_idx == null) {
                 const name_copy = try gpa.dupe(u8, "default");
                 try objects_out.append(gpa, .{ .name = name_copy });
+                try objVertexStarts.append(gpa, data.positions.items.len);
                 current_obj_idx = objects_out.items.len - 1;
             }
             const obj = &objects_out.items[current_obj_idx.?];
@@ -390,6 +399,62 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
                 }
                 try sub.indices.append(gpa, idx);
             }
+        }
+    }
+    // --- Fallback: .obj without any `f` (no indices) becomes Point cloud ---
+    // Any object that stayed without mesh/line/point but has vertices assigned
+    // to it is interpreted as a Point primitive: each `v` becomes a point.
+    // This covers `src/models/points/sphere.obj` which contains only `v` lines.
+    if (objects_out.items.len == 0 and data.positions.items.len > 0) {
+        // No `o` at all -> create a single default point object covering all.
+        const name_copy = try gpa.dupe(u8, "default");
+        try objects_out.append(gpa, .{ .name = name_copy });
+        try objVertexStarts.append(gpa, 0);
+    }
+    for (objects_out.items, 0..) |*obj, idx| {
+        const has_mesh = obj.mesh != null and (obj.mesh.?.vertices.items.len > 0 or obj.mesh.?.indices.items.len > 0);
+        const has_line = obj.line != null and (obj.line.?.vertices.items.len > 0 or obj.line.?.indices.items.len > 0);
+        const has_point = obj.point != null and (obj.point.?.vertices.items.len > 0 or obj.point.?.indices.items.len > 0);
+        if (has_mesh or has_line or has_point) continue;
+        const start = if (idx < objVertexStarts.items.len) objVertexStarts.items[idx] else 0;
+        const end = if (idx + 1 < objVertexStarts.items.len) objVertexStarts.items[idx + 1] else data.positions.items.len;
+        var actualStart = start;
+        var actualEnd = end;
+        if (actualEnd <= actualStart) {
+            // No slice (e.g. `o` after vertices, or empty file). For a single
+            // object, fall back to the whole vertex buffer; otherwise skip.
+            if (objects_out.items.len == 1 and data.positions.items.len > 0) {
+                actualStart = 0;
+                actualEnd = data.positions.items.len;
+            } else {
+                continue;
+            }
+        }
+        if (actualEnd <= actualStart) continue;
+        var pt = newSubData(gpa, .point);
+        errdefer pt.deinit(gpa);
+        if (data.colors_present) pt.hasColor = true;
+        // Pure-v clouds have no UV/normal indices; keep hasUV/hasNormal false
+        // so only positions (and optional colors) are packed.
+        for (actualStart..actualEnd) |p_idx| {
+            const key = VertexKey{ .p = p_idx, .vt = -1, .vn = -1 };
+            const maybe = pt.vertexMap.get(key);
+            var out_idx: u32 = undefined;
+            if (maybe) |existing| {
+                out_idx = existing;
+            } else {
+                const new_idx: u32 = @intCast(pt.vertices.items.len);
+                const vtx = buildVertex(data, p_idx, null, null);
+                try pt.vertices.append(gpa, vtx);
+                try pt.vertexMap.put(key, new_idx);
+                out_idx = new_idx;
+            }
+            try pt.indices.append(gpa, out_idx);
+        }
+        if (pt.vertices.items.len > 0) {
+            obj.point = pt;
+        } else {
+            pt.deinit(gpa);
         }
     }
 }
