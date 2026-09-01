@@ -826,6 +826,77 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, line);
             }
 
+            // SOA nested struct mirroring parent layout but with slices
+            {
+                const soa_fun_prefix = try text_utils.repeat(gpa, " ", ((depth + 4) * spaces_per_depth));
+                defer if (soa_fun_prefix) |p| gpa.free(p);
+                const soa_return_prefix = try text_utils.repeat(gpa, " ", ((depth + 5) * spaces_per_depth));
+                defer if (soa_return_prefix) |p| gpa.free(p);
+                try inner.appendSlice(gpa, attr_prefix orelse "");
+                try inner.appendSlice(gpa, "pub const SOA = struct {\n");
+                {
+                    const line = try std.fmt.allocPrint(gpa, "{s}position: []const {s},\n", .{ soa_fun_prefix orelse "", posType });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasColor) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}color: []const {s},\n", .{ soa_fun_prefix orelse "", colorType });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasUV) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}uv: []const {s},\n", .{ soa_fun_prefix orelse "", uvType });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasNormal) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}normal: []const {s},\n", .{ soa_fun_prefix orelse "", normalType });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                {
+                    const line = try std.fmt.allocPrint(gpa, "{s}indices: []const {s},\n", .{ soa_fun_prefix orelse "", indexTypeStr });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                try inner.appendSlice(gpa, attr_prefix orelse "");
+                try inner.appendSlice(gpa, "};\n");
+
+                try inner.appendSlice(gpa, attr_prefix orelse "");
+                try inner.appendSlice(gpa, "pub fn instanceSOA(allocator: std.mem.Allocator) !SOA {\n");
+                try inner.appendSlice(gpa, soa_fun_prefix orelse "");
+                try inner.appendSlice(gpa, "return .{\n");
+                {
+                    const line = try std.fmt.allocPrint(gpa, "{s}.position = try position.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasColor) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}.color = try color.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasUV) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}.uv = try uv.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                if (sub.hasNormal) {
+                    const line = try std.fmt.allocPrint(gpa, "{s}.normal = try normal.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                {
+                    const line = try std.fmt.allocPrint(gpa, "{s}.indices = try indices.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    defer gpa.free(line);
+                    try inner.appendSlice(gpa, line);
+                }
+                try inner.appendSlice(gpa, soa_fun_prefix orelse "");
+                try inner.appendSlice(gpa, "};\n");
+                try inner.appendSlice(gpa, attr_prefix orelse "");
+                try inner.appendSlice(gpa, "}\n");
+            }
+
             // unloadAll
             try inner.appendSlice(gpa, attr_prefix orelse "");
             try inner.appendSlice(gpa, "pub fn unloadAll(allocator: std.mem.Allocator) void {\n");
