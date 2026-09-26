@@ -5,11 +5,11 @@ const Node = @import("assets_manager").assets_tree.Node;
 /// Text helpers from `assets_manager`, used in `getMappingCode` and `emitSubStruct` for indentation repeats and for converting file and object names into valid Zig identifiers.
 const text_utils = @import("assets_manager").text_utils;
 /// Binary descriptor definitions from `assets_manager`, source of the `BinaryDescriptor` and `MappingDescriptor` types implemented by the struct returned from `ObjBinaryDescriptor`.
-const binary_descriptors = @import("assets_manager").binary_descriptors;
+const binary_ns = @import("assets_manager").descriptors.binary;
 /// Binary bundling interface type implemented by `ObjBinaryDescriptor.descriptor`; drives `getData` packing and `deinitData` cleanup during asset builds.
-const BinaryDescriptor = binary_descriptors.BinaryDescriptor;
+const BinaryDescriptor = binary_ns.abstract.BinaryDescriptor;
 /// Mapping interface type implemented by `ObjBinaryDescriptor.mapping`; drives `getMappingCode` generation of typed `Asset` accessors consumed by downstream Zig code.
-const MappingDescriptor = binary_descriptors.MappingDescriptor;
+const MappingDescriptor = binary_ns.abstract.MappingDescriptor;
 
 /// Primitive class of a per-object sub-buffer, keeps mesh, line and point data in independent deduplicated buffers so points and lines never inherit face attributes.
 const SubKind = enum {
