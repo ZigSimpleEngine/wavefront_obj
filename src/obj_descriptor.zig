@@ -1,25 +1,46 @@
+/// Standard library import providing allocation, IO, math, formatting and container types used across the parser, binary packer and mapping generator.
 const std = @import("std");
+/// Asset tree node type from `assets_manager`, used in `isSuitableData` to filter `.obj` files and in `getMappingCode` to resolve file paths and generated identifiers.
 const Node = @import("assets_manager").assets_tree.Node;
+/// Text helpers from `assets_manager`, used in `getMappingCode` and `emitSubStruct` for indentation repeats and for converting file and object names into valid Zig identifiers.
 const text_utils = @import("assets_manager").text_utils;
+/// Binary descriptor definitions from `assets_manager`, source of the `BinaryDescriptor` and `MappingDescriptor` types implemented by the struct returned from `ObjBinaryDescriptor`.
 const binary_descriptors = @import("assets_manager").binary_descriptors;
+/// Binary bundling interface type implemented by `ObjBinaryDescriptor.descriptor`; drives `getData` packing and `deinitData` cleanup during asset builds.
 const BinaryDescriptor = binary_descriptors.BinaryDescriptor;
+/// Mapping interface type implemented by `ObjBinaryDescriptor.mapping`; drives `getMappingCode` generation of typed `Asset` accessors consumed by downstream Zig code.
 const MappingDescriptor = binary_descriptors.MappingDescriptor;
 
-// Parsed object representation for internal use.
-// An object splits into independent primitive sub-buffers (Mesh/Line/Point),
-// each with its own deduplicated vertex set so points/lines never drag the
-// full face attribute set with them.
-const SubKind = enum { mesh, line, point };
+/// Primitive class of a per-object sub-buffer, keeps mesh, line and point data in independent deduplicated buffers so points and lines never inherit face attributes.
+const SubKind = enum {
+    /// Triangle mesh sub-buffer fed by `f` face records, triangulated as a fan in `parseObjContent` and packed and emitted as `Mesh` by `packSubData` and `emitSubStruct`.
+    mesh,
+    /// Polyline sub-buffer fed by `l` records through `parseCornerLine`, packed and emitted as `Line` by `packSubData` and `emitSubStruct`.
+    line,
+    /// Point cloud sub-buffer fed by `p` records plus the pure `v` fallback in `parseObjContent`, packed and emitted as `Point` by `packSubData` and `emitSubStruct`.
+    point,
+};
 
+/// Deduplicated primitive buffer for one `SubKind` inside a `ParsedObject`, accumulated in `parseObjContent` and consumed by `packSubData` and `emitSubStruct`.
 const SubData = struct {
+    /// Primitive class of this buffer, selects the generated struct name in `emitSubStruct` and is set once in `newSubData`.
     kind: SubKind,
+    /// Deduplicated vertex list keyed by `vertexMap`, appended in `parseObjContent` face, line and point branches and serialized attribute by attribute in `packSubData`.
     vertices: std.ArrayList(Vertex),
+    /// Index list referencing `vertices`, appended alongside vertex deduplication and packed with the smallest fitting integer width in `packSubData`.
     indices: std.ArrayList(u32),
+    /// Deduplication map from `VertexKey` to vertex index, consulted on every corner in `parseObjContent` to reuse identical position and attribute combinations.
     vertexMap: std.AutoHashMap(VertexKey, u32),
+    /// Presence flag for texture coordinates, set when any corner resolves a `vt` index and controls whether UV blocks are packed and emitted.
     hasUV: bool = false,
+    /// Presence flag for normals, set when any corner resolves a `vn` index; when false `parseObjContent` substitutes a computed face normal.
     hasNormal: bool = false,
+    /// Presence flag for vertex colors, set when file-wide `colors_present` is true and controls whether color blocks are packed and emitted.
     hasColor: bool = false,
 
+    /// Releases vertex, index and map storage owned by this sub-buffer, called from `deinitParsedObject` and from the point-cloud fallback error path.
+    /// - `self` - Sub-buffer to deinitialize; its lists and map become unusable after this call.
+    /// - `gpa` - Allocator that owns `vertices`, `indices` and the internal `vertexMap` storage.
     fn deinit(self: *SubData, gpa: std.mem.Allocator) void {
         self.vertices.deinit(gpa);
         self.indices.deinit(gpa);
@@ -27,27 +48,43 @@ const SubData = struct {
     }
 };
 
+/// Single named object assembled from `o` and `g` directives, owns up to three optional `SubData` buffers later packed in mesh, line, point order by `getData`.
 const ParsedObject = struct {
-    name: []u8, // owned
+    /// Owned object name duplicated from the `o` or `g` line, used as the basis for the generated Zig constant in `getMappingCode` and freed in `deinitParsedObject`.
+    name: []u8,
+    /// Optional mesh buffer built from `f` faces, created on demand in `parseObjContent` and packed first in `getData`.
     mesh: ?SubData = null,
+    /// Optional line buffer built from `l` records, created on demand in `parseObjContent` and packed after the mesh in `getData`.
     line: ?SubData = null,
+    /// Optional point buffer built from `p` records or the pure `v` fallback, created on demand in `parseObjContent` and packed last in `getData`.
     point: ?SubData = null,
 };
 
+/// Fully resolved intermediate vertex in `f64` precision, built by `buildVertex` from global `FileData` tables and stored in `SubData.vertices` before scalar conversion in `packSubData`.
 const Vertex = struct {
+    /// Position sampled from `FileData.positions`, always present and serialized first in `packSubData`.
     pos: [3]f64,
+    /// Texture coordinate sampled from `FileData.texcoords` or zero when the corner has no `vt` index; serialized only when the owning buffer sets `hasUV`.
     uv: [2]f64,
+    /// Normal sampled from `FileData.normals`, substituted with a computed face normal or zero when missing; serialized only when the owning buffer sets `hasNormal`.
     normal: [3]f64,
+    /// Color sampled from `FileData.colors` aligned with the position index, zero with zero alpha when the `v` line carries no color; serialized only when the owning buffer sets `hasColor`.
     color: [4]f64,
 };
 
+/// Hashable corner identity used as `SubData.vertexMap` key to deduplicate vertices sharing the same position, texcoord and normal indices.
 const VertexKey = struct {
+    /// Resolved position index into `FileData.positions`, always present and derived via `resolveIndex` in face, line and point parsing.
     p: usize,
-    vt: isize, // -1 means missing
+    /// Resolved texcoord index as a signed value with `-1` for missing, produced from optional `vt` corners and compared during deduplication.
+    vt: isize,
+    /// Resolved normal index as a signed value with `-1` for missing, produced from optional `vn` corners and compared during deduplication.
     vn: isize,
 };
 
-// Helper to free ParsedObject
+/// Frees an object name and all owned sub-buffers, used to clean the `objects` list in `getData`, `getMappingCode` and the unit test.
+/// - `obj` - Parsed object whose `name` and optional `mesh`, `line` and `point` buffers are released.
+/// - `gpa` - Allocator that owns the name copy and all sub-buffer storage.
 fn deinitParsedObject(obj: *ParsedObject, gpa: std.mem.Allocator) void {
     gpa.free(obj.name);
     if (obj.mesh) |*m| m.deinit(gpa);
@@ -55,6 +92,11 @@ fn deinitParsedObject(obj: *ParsedObject, gpa: std.mem.Allocator) void {
     if (obj.point) |*pt| pt.deinit(gpa);
 }
 
+/// Creates an empty sub-buffer of the given kind, used whenever `parseObjContent` first encounters an `f`, `l` or `p` record for an object and in the point-cloud fallback.
+/// - `gpa` - Allocator used to initialize the internal `vertexMap`; vertex and index lists start empty.
+/// - `kind` - Primitive class stored in the new `SubData.kind` field and later used to name the generated struct.
+///
+/// Return: Initialized empty `SubData` ready to receive deduplicated vertices and indices.
 fn newSubData(gpa: std.mem.Allocator, kind: SubKind) SubData {
     return .{
         .kind = kind,
@@ -64,6 +106,12 @@ fn newSubData(gpa: std.mem.Allocator, kind: SubKind) SubData {
     };
 }
 
+/// Loads a complete file into memory for `getData` and `getMappingCode` before OBJ parsing.
+/// - `gpa` - Allocator used for the returned content buffer.
+/// - `io` - IO context used to open the current directory file and stream its bytes.
+/// - `path` - File system path resolved by the caller from an asset node path.
+///
+/// Return: Owned file bytes, possibly truncated on short reads and empty for zero-size files.
 fn readFileContent(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     var cwd = std.Io.Dir.cwd();
     var file = try cwd.openFile(io, path, .{});
@@ -86,14 +134,27 @@ fn readFileContent(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return buf;
 }
 
+/// Parses a decimal token from `v`, `vt` and `vn` lines in `parseObjContent`.
+/// - `s` - Single whitespace-separated number token.
+///
+/// Return: Parsed `f64` value or a float parse error.
 fn parseFloatSafe(s: []const u8) !f64 {
     return std.fmt.parseFloat(f64, s);
 }
 
+/// Parses a decimal index token from `f`, `l` and `p` corner references in `parseObjContent` and `parseCornerLine`.
+/// - `s` - Single index token without the slash separators.
+///
+/// Return: Parsed `i32` index, still in OBJ 1-based or negative-relative form before `resolveIndex`.
 fn parseIntSafe(s: []const u8) !i32 {
     return std.fmt.parseInt(i32, s, 10);
 }
 
+/// Converts OBJ 1-based and negative relative indices to 0-based storage indices with bounds checking, used for every position, texcoord and normal reference.
+/// - `raw` - Raw OBJ index where positive values are 1-based, negative values count back from the end, and zero is invalid.
+/// - `count` - Current element count of the referenced table used for bounds checks and negative resolution.
+///
+/// Return: Validated 0-based index into the referenced table.
 fn resolveIndex(raw: i32, count: usize) !usize {
     if (raw == 0) return error.InvalidIndex;
     if (raw > 0) {
@@ -101,7 +162,6 @@ fn resolveIndex(raw: i32, count: usize) !usize {
         if (idx >= count) return error.IndexOutOfBounds;
         return idx;
     } else {
-        // negative: relative to end, -1 = last
         const idx_isize = @as(isize, @intCast(count)) + raw;
         if (idx_isize < 0) return error.IndexOutOfBounds;
         const idx = @as(usize, @intCast(idx_isize));
@@ -110,22 +170,37 @@ fn resolveIndex(raw: i32, count: usize) !usize {
     }
 }
 
-// Parser-wide vertex data: positions, texcoords and normals live in the whole
-// file (indexed by the face/line/point corner references), while color is
-// derived from the same `v` line and indexed like position.
+/// File-wide vertex tables shared by all objects, filled from `v`, `vt` and `vn` lines in `parseObjContent` and read by `buildVertex`.
 const FileData = struct {
+    /// All positions in file order, indexed by resolved `p` corner values and parallel to `colors`.
     positions: std.ArrayList([3]f64),
+    /// Per-position colors parsed from extended `v` lines, parallel to `positions` and sampled together in `buildVertex`.
     colors: std.ArrayList([4]f64),
+    /// All texture coordinates in file order, indexed by resolved `vt` corner values.
     texcoords: std.ArrayList([2]f64),
+    /// All normals in file order, indexed by resolved `vn` corner values.
     normals: std.ArrayList([3]f64),
+    /// Global color presence latch set when any `v` line carries color values; copied into each active `SubData.hasColor` flag.
     colors_present: bool = false,
 };
 
+/// Resolves an optional `vt` or `vn` raw index via `resolveIndex`, preserving absence as null for `buildVertex` defaults.
+/// - `raw` - Optional raw OBJ index, null when the corner omits the corresponding slash-separated part.
+/// - `count` - Current element count of the referenced texcoord or normal table.
+///
+/// Return: Resolved 0-based index or null when the corner has no such component.
 fn cornerIdxOf(raw: ?i32, count: usize) !?usize {
     const rv = raw orelse return null;
     return try resolveIndex(rv, count);
 }
 
+/// Assembles a `Vertex` from global tables, used for every deduplicated face, line and point corner including the pure `v` fallback.
+/// - `data` - File-wide tables supplying position, color, texcoord and normal values.
+/// - `p_idx` - Resolved position index selecting both `positions` and parallel `colors` entries.
+/// - `vt_idx` - Optional resolved texcoord index, null selects a zero UV.
+/// - `vn_idx` - Optional resolved normal index, null selects a zero normal later possibly replaced by a computed face normal.
+///
+/// Return: Fully populated intermediate vertex in `f64` precision.
 fn buildVertex(data: *const FileData, p_idx: usize, vt_idx: ?usize, vn_idx: ?usize) Vertex {
     const pos = data.positions.items[p_idx];
     const color = data.colors.items[p_idx];
@@ -136,14 +211,29 @@ fn buildVertex(data: *const FileData, p_idx: usize, vt_idx: ?usize, vn_idx: ?usi
     return .{ .pos = pos, .uv = uv, .normal = normal, .color = color };
 }
 
+/// Compares two 3-component vectors for exact equality, currently unused and reserved for future position or normal comparison helpers.
+/// - `a` - First vector.
+/// - `b` - Second vector.
+///
+/// Return: True when all three components are exactly equal.
 fn isSameVector3(a: [3]f64, b: [3]f64) bool {
     return a[0] == b[0] and a[1] == b[1] and a[2] == b[2];
 }
 
+/// Adds two 3-component vectors component-wise, currently unused and reserved for future normal averaging or position math.
+/// - `a` - First addend.
+/// - `b` - Second addend.
+///
+/// Return: Component-wise sum of the two input vectors.
 fn addVector3(a: [3]f64, b: [3]f64) [3]f64 {
     return .{ a[0] + b[0], a[1] + b[1], a[2] + b[2] };
 }
 
+/// Computes the cross product of two edge vectors, used in `parseObjContent` together with `normalize3` to derive a face normal when `vn` data is absent.
+/// - `a` - First edge vector.
+/// - `b` - Second edge vector.
+///
+/// Return: Cross product vector perpendicular to both inputs.
 fn cross(a: [3]f64, b: [3]f64) [3]f64 {
     return .{
         a[1] * b[2] - a[2] * b[1],
@@ -152,26 +242,31 @@ fn cross(a: [3]f64, b: [3]f64) [3]f64 {
     };
 }
 
+/// Normalizes a 3-component vector, returning zero on zero length; used in `parseObjContent` with `cross` to produce unit face normals for buffers without `hasNormal`.
+/// - `v` - Input vector, typically the cross product of two face edges.
+///
+/// Return: Unit-length vector in the same direction, or zero when the input has zero length.
 fn normalize3(v: [3]f64) [3]f64 {
     const len = std.math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     if (len == 0) return .{ 0, 0, 0 };
     return .{ v[0] / len, v[1] / len, v[2] / len };
 }
 
+/// Parses complete Wavefront OBJ text into per-object primitive buffers and global vertex tables, handling `o`, `g`, `v`, `vt`, `vn`, `s`, `f`, `l` and `p` lines plus BOM removal, comment skipping and pure `v` point-cloud fallback. Consumed by `getData`, `getMappingCode` and the unit test.
+/// - `gpa` - Allocator used for all parsed lists, duplicated object names and fallback point clouds.
+/// - `content` - Complete OBJ file text previously loaded by `readFileContent` and split line by line.
+/// - `objects_out` - Output list receiving one `ParsedObject` per `o` or `g` block with deduplicated mesh, line and point buffers.
+/// - `data` - Global `FileData` tables filled from `v`, `vt` and `vn` lines alongside `objects_out`.
 fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *std.ArrayList(ParsedObject), data: *FileData) !void {
     var lines = std.mem.splitScalar(u8, content, '\n');
     var current_obj_idx: ?usize = null;
-    // Current smoothing group for face normals when vn is absent (-1 = flat/off).
     var current_group: i32 = -1;
-    // Track per-object vertex start indices so pure-v objects can be turned
-    // into Point clouds using only their own slice of `data.positions`.
     var objVertexStarts: std.ArrayList(usize) = .empty;
     defer objVertexStarts.deinit(gpa);
     while (lines.next()) |raw_line| {
         var line = std.mem.trim(u8, raw_line, " \t\r");
         if (line.len == 0) continue;
         if (line[0] == '#') continue;
-        // handle BOM
         if (line.len >= 3 and line[0] == 0xEF and line[1] == 0xBB and line[2] == 0xBF) {
             line = line[3..];
             line = std.mem.trim(u8, line, " \t\r");
@@ -206,10 +301,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             if (count < 3) continue;
             const v: [3]f64 = .{ vals[0], vals[1], vals[2] };
             try data.positions.append(gpa, v);
-            // Optional colour: after xyz (an optional 4th "w" is skipped) the next
-            // 3 (or 4) values are r g b [a]. When absent, colour is (0,0,0,0).
-            // 6 values  -> "v x y z r g b"   (color at index 3)
-            // 7 values  -> "v x y z w r g b" (color at index 4)
             var color: [4]f64 = .{ 0, 0, 0, 0 };
             if (count == 6) {
                 color = .{ vals[3], vals[4], vals[5], 1.0 };
@@ -254,7 +345,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
                 current_group = std.fmt.parseInt(i32, rest, 10) catch -1;
             }
         } else if (std.mem.startsWith(u8, line, "f ")) {
-            // ensure current object exists
             if (current_obj_idx == null) {
                 const name_copy = try gpa.dupe(u8, "default");
                 try objects_out.append(gpa, .{ .name = name_copy });
@@ -265,7 +355,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             if (obj.mesh == null) obj.mesh = newSubData(gpa, .mesh);
             const sub = &obj.mesh.?;
             const rest = std.mem.trim(u8, line[2..], " \t");
-            // collect corners for this face
             var corners: std.ArrayList(struct { p: usize, vt: ?usize, vn: ?usize }) = .empty;
             defer corners.deinit(gpa);
             var tok_it = std.mem.tokenizeAny(u8, rest, " \t");
@@ -293,9 +382,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
                 try corners.append(gpa, .{ .p = p_idx, .vt = vt_idx, .vn = vn_idx });
             }
             if (corners.items.len < 3) continue;
-            // triangulate fan from 0
             const v0 = corners.items[0];
-            // record per-face normal (computed) so we can average for smooth groups
             var face_normal: [3]f64 = .{ 0, 0, 0 };
             if (data.colors_present) sub.hasColor = true;
             const need_computed_normal = !sub.hasNormal;
@@ -323,7 +410,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
                         const new_idx: u32 = @intCast(sub.vertices.items.len);
                         var vtx = buildVertex(data, corner.p, corner.vt, corner.vn);
                         if (need_computed_normal) {
-                            // The average is accumulated below via pending normal list.
                             vtx.normal = face_normal;
                         }
                         try sub.vertices.append(gpa, vtx);
@@ -401,12 +487,7 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
             }
         }
     }
-    // --- Fallback: .obj without any `f` (no indices) becomes Point cloud ---
-    // Any object that stayed without mesh/line/point but has vertices assigned
-    // to it is interpreted as a Point primitive: each `v` becomes a point.
-    // This covers `src/models/points/sphere.obj` which contains only `v` lines.
     if (objects_out.items.len == 0 and data.positions.items.len > 0) {
-        // No `o` at all -> create a single default point object covering all.
         const name_copy = try gpa.dupe(u8, "default");
         try objects_out.append(gpa, .{ .name = name_copy });
         try objVertexStarts.append(gpa, 0);
@@ -421,8 +502,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
         var actualStart = start;
         var actualEnd = end;
         if (actualEnd <= actualStart) {
-            // No slice (e.g. `o` after vertices, or empty file). For a single
-            // object, fall back to the whole vertex buffer; otherwise skip.
             if (objects_out.items.len == 1 and data.positions.items.len > 0) {
                 actualStart = 0;
                 actualEnd = data.positions.items.len;
@@ -434,8 +513,6 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
         var pt = newSubData(gpa, .point);
         errdefer pt.deinit(gpa);
         if (data.colors_present) pt.hasColor = true;
-        // Pure-v clouds have no UV/normal indices; keep hasUV/hasNormal false
-        // so only positions (and optional colors) are packed.
         for (actualStart..actualEnd) |p_idx| {
             const key = VertexKey{ .p = p_idx, .vt = -1, .vn = -1 };
             const maybe = pt.vertexMap.get(key);
@@ -459,9 +536,25 @@ fn parseObjContent(gpa: std.mem.Allocator, content: []const u8, objects_out: *st
     }
 }
 
-const Corner = struct { p: usize, vt: ?usize, vn: ?usize };
+/// Resolved `l` and `p` corner produced by `parseCornerLine` and consumed in the line and point branches of `parseObjContent`.
+const Corner = struct {
+    /// Resolved position index into `FileData.positions`, validated by `resolveIndex` against the current position count.
+    p: usize,
+    /// Optional resolved texcoord index into `FileData.texcoords`, null when the token omits the `vt` part.
+    vt: ?usize,
+    /// Optional resolved normal index into `FileData.normals`, null when the token omits the `vn` part.
+    vn: ?usize,
+};
 
+/// Growable list of `Corner` values returned by `parseCornerLine` for one `l` or `p` line and iterated by the line and point branches of `parseObjContent`.
 const CornerList = std.ArrayList(Corner);
+
+/// Parses whitespace-separated `v` and optional `vt` and `vn` tokens of one `l` or `p` line, shared by both line and point branches to avoid duplicated corner logic.
+/// - `gpa` - Allocator used for the returned corner list.
+/// - `rest` - Trimmed remainder of the `l` or `p` line after its prefix, containing slash-separated corner tokens.
+/// - `data` - File-wide tables used to validate every resolved `p`, `vt` and `vn` index.
+///
+/// Return: Owned corner list with all valid entries; invalid empty `v` tokens are skipped.
 fn parseCornerLine(gpa: std.mem.Allocator, rest: []const u8, data: *const FileData) !CornerList {
     var corners: CornerList = .empty;
     errdefer corners.deinit(gpa);
@@ -490,13 +583,25 @@ fn parseCornerLine(gpa: std.mem.Allocator, rest: []const u8, data: *const FileDa
     return corners;
 }
 
-// Descriptor that handles .obj files: packs into compact binary
+/// Generic factory creating the `assets_manager` binary and mapping implementation for Wavefront OBJ files, instantiated as `DefaultObjBinaryDescriptor` for `f32` and re-exported through `root.zig` and `build.zig`.
+/// - `Scalar` - Floating-point type used for packed positions, colors, UVs and normals; determines `@sizeOf(Scalar)` block sizes and `@floatCast` conversions in `packSubData` and `emitSubStruct`.
+///
+/// Return: Descriptor struct type implementing `BinaryDescriptor` and `MappingDescriptor` for `.obj` assets.
 pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
     return struct {
+        /// Alias to the concrete instantiated descriptor struct, used to cast the opaque `ptr` in `getData`, `getMappingCode`, `mapping` and `descriptor`.
         const Self = @This();
+        /// Preserved scalar type alias documenting the configured float precision; the implementation itself uses `Scalar` directly for packing and type name generation.
         const ScalarType = Scalar;
+        /// Spaces per nesting depth for generated Zig code, multiplied by `depth` in `getMappingCode` and forwarded to `emitSubStruct` for aligned output.
         spaces_per_depth: usize = 4,
 
+        /// Reports whether an asset node holds Wavefront OBJ data, called by `assets_manager` during descriptor selection before `getData` or `getMappingCode`.
+        /// - `ptr` - Opaque descriptor instance pointer, unused because suitability depends only on the node.
+        /// - `init` - Process context, unused here but kept for the shared descriptor vtable signature.
+        /// - `node` - Asset tree node to inspect; only file nodes ending in `.obj` are accepted.
+        ///
+        /// Return: True for `.obj` file nodes, false otherwise.
         pub fn isSuitableData(ptr: *anyopaque, init: std.process.Init, node: *Node) anyerror!bool {
             _ = ptr;
             _ = init;
@@ -505,6 +610,12 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             return false;
         }
 
+        /// Packs one `.obj` file into a compact binary blob in mesh, line, point order, called by `assets_manager` when building the asset bundle.
+        /// - `ptr` - Opaque descriptor instance pointer, currently unused because packing depends only on file content and `Scalar`.
+        /// - `init` - Process context supplying the allocator and IO used by `readFileContent` and the parser.
+        /// - `node_path` - File system path of the `.obj` file to load, parse with `parseObjContent` and serialize with `packSubData`.
+        ///
+        /// Return: Owned binary bytes with per-vertex `Scalar` attributes followed by minimal-width indices.
         pub fn getData(ptr: *anyopaque, init: std.process.Init, node_path: []const u8) anyerror![]u8 {
             const self: *Self = @ptrCast(@alignCast(ptr));
             _ = self;
@@ -542,10 +653,13 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             return bin.toOwnedSlice(gpa);
         }
 
+        /// Appends one sub-buffer attribute blocks and minimal-width indices to the binary bundle in the exact layout mirrored by `emitSubStruct` offsets, called from `getData` for mesh, line and point buffers.
+        /// - `gpa` - Allocator used to grow the output byte list.
+        /// - `sub` - Source deduplicated buffer whose positions, optional colors, UVs, normals and indices are serialized.
+        /// - `bin` - Destination byte buffer receiving raw `Scalar` attribute bytes followed by `u8`, `u16` or `u32` indices.
         fn packSubData(gpa: std.mem.Allocator, sub: *const SubData, bin: *std.ArrayList(u8)) !void {
             if (sub.vertices.items.len == 0 and sub.indices.items.len == 0) return;
             const vertexCount = sub.vertices.items.len;
-            // positions
             for (sub.vertices.items) |v| {
                 const comps = [_]f64{ v.pos[0], v.pos[1], v.pos[2] };
                 for (comps) |c| {
@@ -580,7 +694,6 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                     }
                 }
             }
-            // pack indices as minimal type
             const vertexCountInt = vertexCount;
             if (vertexCountInt <= 256) {
                 for (sub.indices.items) |idx| {
@@ -600,11 +713,21 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             }
         }
 
+        /// Releases a binary blob previously returned by `getData`, called by `assets_manager` after the blob has been copied into the bundle.
+        /// - `ptr` - Opaque descriptor instance pointer, unused because deallocation needs only the allocator.
+        /// - `init` - Process context supplying the allocator that owns `data`.
+        /// - `data` - Binary bytes to free.
         pub fn deinitData(ptr: *anyopaque, init: std.process.Init, data: []u8) void {
             _ = ptr;
             init.gpa.free(data);
         }
 
+        /// Generates typed Zig accessor code for one `.obj` file with per-object `Mesh`, `Line` and `Point` structs plus `SOA`, `instanceSOA` and `unloadAll`, called by `assets_manager` through the mapping vtable.
+        /// - `ptr` - Opaque descriptor instance pointer providing `spaces_per_depth` for indentation.
+        /// - `init` - Process context supplying the allocator and IO used to reload and reparse the file.
+        /// - `data` - Mapping inputs carrying the asset node, bundle-relative paths, depth, base offset and previously escaped bundle path context.
+        ///
+        /// Return: Owned generated Zig source for the file constant, or an empty struct when no drawable primitive exists.
         pub fn getMappingCode(ptr: *anyopaque, init: std.process.Init, data: MappingDescriptor.Data) anyerror![]u8 {
             const self: *Self = @ptrCast(@alignCast(ptr));
             const gpa = init.gpa;
@@ -638,7 +761,6 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             }
             try parseObjContent(gpa, content, &objects, &fdata);
 
-            // Prepare prefixes
             const prefix = try text_utils.repeat(gpa, " ", depth * self.spaces_per_depth);
             defer if (prefix) |p| gpa.free(p);
             const obj_prefix = try text_utils.repeat(gpa, " ", (depth + 1) * self.spaces_per_depth);
@@ -749,6 +871,23 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             });
         }
 
+        /// Emits one `Mesh`, `Line` or `Point` accessor struct with `Asset` constants plus nested `SOA`, `instanceSOA` and `unloadAll`, advancing the shared bundle offset cursor exactly as `packSubData` lays out bytes. Called from `getMappingCode` for every non-empty sub-buffer.
+        /// - `gpa` - Allocator used for temporary indentation strings and formatted `Asset` lines appended to `inner`.
+        /// - `sub` - Source sub-buffer providing vertex counts, attribute presence flags and primitive kind for naming.
+        /// - `inner` - Destination source buffer receiving the generated struct text.
+        /// - `sub_prefix` - Indentation for the `pub const Mesh` style struct header.
+        /// - `attr_prefix` - Indentation for attribute `Asset` constants and helper definitions inside the struct.
+        /// - `escaped` - Escaped bundle path text reused verbatim in every generated `Asset` path argument.
+        /// - `cumulative` - Running byte cursor advanced by each attribute and index block; combined with `baseOffset` to compute absolute offsets.
+        /// - `baseOffset` - Bundle base offset of this `.obj` file supplied in `MappingDescriptor.Data.offset`.
+        /// - `posType` - Formatted position vector type name derived from `Scalar`.
+        /// - `colorType` - Formatted color vector type name derived from `Scalar`.
+        /// - `uvType` - Formatted UV vector type name derived from `Scalar`.
+        /// - `normalType` - Formatted normal vector type name derived from `Scalar`.
+        /// - `depth` - Nesting depth used to derive `SOA` helper indentation.
+        /// - `spaces_per_depth` - Spaces per depth level copied from the descriptor instance for consistent formatting.
+        ///
+        /// Return: Position block size when a struct was emitted, null when the sub-buffer is empty and skipped.
         fn emitSubStruct(
             gpa: std.mem.Allocator,
             sub: *const SubData,
@@ -826,7 +965,6 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, line);
             }
 
-            // SOA nested struct mirroring parent layout but with slices
             {
                 const soa_fun_prefix = try text_utils.repeat(gpa, " ", ((depth + 4) * spaces_per_depth));
                 defer if (soa_fun_prefix) |p| gpa.free(p);
@@ -867,27 +1005,27 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, soa_fun_prefix orelse "");
                 try inner.appendSlice(gpa, "return .{\n");
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.position = try position.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    const line = try std.fmt.allocPrint(gpa, "{s}.position = try position.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasColor) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.color = try color.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    const line = try std.fmt.allocPrint(gpa, "{s}.color = try color.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasUV) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.uv = try uv.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    const line = try std.fmt.allocPrint(gpa, "{s}.uv = try uv.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasNormal) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.normal = try normal.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    const line = try std.fmt.allocPrint(gpa, "{s}.normal = try normal.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.indices = try indices.instance(allocator),\n", .{ soa_return_prefix orelse "" });
+                    const line = try std.fmt.allocPrint(gpa, "{s}.indices = try indices.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
@@ -897,33 +1035,32 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, "}\n");
             }
 
-            // unloadAll
             try inner.appendSlice(gpa, attr_prefix orelse "");
             try inner.appendSlice(gpa, "pub fn unloadAll(allocator: std.mem.Allocator) void {\n");
             const fun_prefix = try text_utils.repeat(gpa, " ", ((depth + 4) * spaces_per_depth));
             defer if (fun_prefix) |p| gpa.free(p);
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}position.unload(allocator);\n", .{ fun_prefix orelse "" });
+                const line = try std.fmt.allocPrint(gpa, "{s}position.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasColor) {
-                const line = try std.fmt.allocPrint(gpa, "{s}color.unload(allocator);\n", .{ fun_prefix orelse "" });
+                const line = try std.fmt.allocPrint(gpa, "{s}color.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasUV) {
-                const line = try std.fmt.allocPrint(gpa, "{s}uv.unload(allocator);\n", .{ fun_prefix orelse "" });
+                const line = try std.fmt.allocPrint(gpa, "{s}uv.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasNormal) {
-                const line = try std.fmt.allocPrint(gpa, "{s}normal.unload(allocator);\n", .{ fun_prefix orelse "" });
+                const line = try std.fmt.allocPrint(gpa, "{s}normal.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}indices.unload(allocator);\n", .{ fun_prefix orelse "" });
+                const line = try std.fmt.allocPrint(gpa, "{s}indices.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
@@ -935,6 +1072,10 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             return posSize;
         }
 
+        /// Builds the mapping half of the `assets_manager` contract, wiring `getMappingCode` into a `MappingDescriptor` consumed by `descriptor` and the asset builder.
+        /// - `self` - Descriptor instance whose pointer is stored in the returned mapping for later `getMappingCode` calls.
+        ///
+        /// Return: Mapping descriptor referencing this instance and its code generator.
         pub fn mapping(self: *Self) MappingDescriptor {
             return .{
                 .ptr = self,
@@ -942,6 +1083,10 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             };
         }
 
+        /// Builds the full binary descriptor consumed by `assets_manager` asset registration, combining `mapping` with the data vtable.
+        /// - `self` - Descriptor instance whose pointer backs both the mapping and binary vtable entries.
+        ///
+        /// Return: Binary descriptor capable of packing `.obj` files and generating their Zig accessors.
         pub fn descriptor(self: *Self) BinaryDescriptor {
             return .{
                 .ptr = self,
@@ -956,7 +1101,7 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
     };
 }
 
-// Also provide non-generic wrapper for convenience with default f32
+/// Convenience `f32` instantiation of `ObjBinaryDescriptor` for consumers that do not need configurable precision; registered with `assets_manager` exactly like the generic version and re-exported through `root.zig` and `build.zig`.
 pub const DefaultObjBinaryDescriptor = ObjBinaryDescriptor(f32);
 
 test "parse obj: color, face vertex indices and line split" {
@@ -991,7 +1136,6 @@ test "parse obj: color, face vertex indices and line split" {
 
     try std.testing.expectEqual(@as(usize, 2), objects.items.len);
 
-    // First object: mesh with colors.
     const tri = &objects.items[0];
     try std.testing.expect(tri.mesh != null);
     try std.testing.expect(tri.line == null);
@@ -999,11 +1143,9 @@ test "parse obj: color, face vertex indices and line split" {
     try std.testing.expectEqual(@as(usize, 3), m.vertices.items.len);
     try std.testing.expectEqual(@as(usize, 3), m.indices.items.len);
     try std.testing.expect(m.hasColor);
-    // Red first vertex
     try std.testing.expectEqual(@as(f64, 1), m.vertices.items[0].color[0]);
     try std.testing.expectEqual(@as(f64, 0), m.vertices.items[0].color[1]);
 
-    // Second object: line primitive only.
     const line = &objects.items[1];
     try std.testing.expect(line.line != null);
     try std.testing.expect(line.mesh == null);
@@ -1011,7 +1153,6 @@ test "parse obj: color, face vertex indices and line split" {
     try std.testing.expectEqual(@as(usize, 3), l.vertices.items.len);
     try std.testing.expectEqual(@as(usize, 3), l.indices.items.len);
     try std.testing.expectEqual(@as(f64, 0), l.vertices.items[0].pos[0]);
-    // Colors are global to the file, so the line sub-buffer carries them too.
     try std.testing.expect(l.hasColor);
     try std.testing.expectEqual(@as(f64, 1), l.vertices.items[0].color[0]);
 }
