@@ -787,13 +787,13 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             }
 
             const scalarName = @typeName(Scalar);
-            const posType = try std.fmt.allocPrint(gpa, "@import(\"math\").Vec(3, {s})", .{scalarName});
+            const posType = try gpa.print("@import(\"math\").Vec(3, {s})", .{scalarName});
             defer gpa.free(posType);
-            const colorType = try std.fmt.allocPrint(gpa, "@import(\"math\").Vec(4, {s})", .{scalarName});
+            const colorType = try gpa.print("@import(\"math\").Vec(4, {s})", .{scalarName});
             defer gpa.free(colorType);
-            const uvType = try std.fmt.allocPrint(gpa, "@import(\"math\").Vec(2, {s})", .{scalarName});
+            const uvType = try gpa.print("@import(\"math\").Vec(2, {s})", .{scalarName});
             defer gpa.free(uvType);
-            const normalType = try std.fmt.allocPrint(gpa, "@import(\"math\").Vec(3, {s})", .{scalarName});
+            const normalType = try gpa.print("@import(\"math\").Vec(3, {s})", .{scalarName});
             defer gpa.free(normalType);
 
             var inner = std.ArrayList(u8).empty;
@@ -818,7 +818,7 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 const base_ident = try text_utils.filenameToIdentifier(gpa, obj.name);
                 var final_ident: []u8 = undefined;
                 if (seen.getPtr(base_ident)) |entry| {
-                    final_ident = try std.fmt.allocPrint(gpa, "{s}_{d}", .{ base_ident, entry.* });
+                    final_ident = try gpa.print("{s}_{d}", .{ base_ident, entry.* });
                     entry.* += 1;
                     gpa.free(base_ident);
                 } else {
@@ -859,10 +859,10 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             defer gpa.free(inner_slice);
 
             if (!any_object) {
-                return std.fmt.allocPrint(gpa, "{s}pub const {s} = struct {{}};\n", .{ prefix orelse "", file_ident });
+                return gpa.print("{s}pub const {s} = struct {{}};\n", .{ prefix orelse "", file_ident });
             }
 
-            return std.fmt.allocPrint(gpa, "{s}pub const {s} = struct {{\n{s}{s}{s}}};\n", .{
+            return gpa.print("{s}pub const {s} = struct {{\n{s}{s}{s}}};\n", .{
                 prefix orelse "",
                 file_ident,
                 inner_slice,
@@ -940,27 +940,27 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             try inner.appendSlice(gpa, " = struct {\n");
 
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}pub const position = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", posType, escaped.items, posOffset, posSize });
+                const line = try gpa.print("{s}pub const position = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", posType, escaped.items, posOffset, posSize });
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasColor) {
-                const line = try std.fmt.allocPrint(gpa, "{s}pub const color = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", colorType, escaped.items, colorOffset, colorSize });
+                const line = try gpa.print("{s}pub const color = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", colorType, escaped.items, colorOffset, colorSize });
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasUV) {
-                const line = try std.fmt.allocPrint(gpa, "{s}pub const uv = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", uvType, escaped.items, uvOffset, uvSize });
+                const line = try gpa.print("{s}pub const uv = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", uvType, escaped.items, uvOffset, uvSize });
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasNormal) {
-                const line = try std.fmt.allocPrint(gpa, "{s}pub const normal = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", normalType, escaped.items, normalOffset, normalSize });
+                const line = try gpa.print("{s}pub const normal = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", normalType, escaped.items, normalOffset, normalSize });
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}pub const indices = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", indexTypeStr, escaped.items, indicesOffset, indexSize });
+                const line = try gpa.print("{s}pub const indices = Asset({s}, \"{s}\", {d}, {d});\n", .{ attr_prefix orelse "", indexTypeStr, escaped.items, indicesOffset, indexSize });
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
@@ -973,27 +973,27 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, attr_prefix orelse "");
                 try inner.appendSlice(gpa, "pub const SOA = struct {\n");
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}position: []const {s},\n", .{ soa_fun_prefix orelse "", posType });
+                    const line = try gpa.print("{s}position: []const {s},\n", .{ soa_fun_prefix orelse "", posType });
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasColor) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}color: []const {s},\n", .{ soa_fun_prefix orelse "", colorType });
+                    const line = try gpa.print("{s}color: []const {s},\n", .{ soa_fun_prefix orelse "", colorType });
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasUV) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}uv: []const {s},\n", .{ soa_fun_prefix orelse "", uvType });
+                    const line = try gpa.print("{s}uv: []const {s},\n", .{ soa_fun_prefix orelse "", uvType });
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasNormal) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}normal: []const {s},\n", .{ soa_fun_prefix orelse "", normalType });
+                    const line = try gpa.print("{s}normal: []const {s},\n", .{ soa_fun_prefix orelse "", normalType });
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}indices: []const {s},\n", .{ soa_fun_prefix orelse "", indexTypeStr });
+                    const line = try gpa.print("{s}indices: []const {s},\n", .{ soa_fun_prefix orelse "", indexTypeStr });
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
@@ -1005,27 +1005,27 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
                 try inner.appendSlice(gpa, soa_fun_prefix orelse "");
                 try inner.appendSlice(gpa, "return .{\n");
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.position = try position.instance(allocator),\n", .{soa_return_prefix orelse ""});
+                    const line = try gpa.print("{s}.position = try position.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasColor) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.color = try color.instance(allocator),\n", .{soa_return_prefix orelse ""});
+                    const line = try gpa.print("{s}.color = try color.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasUV) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.uv = try uv.instance(allocator),\n", .{soa_return_prefix orelse ""});
+                    const line = try gpa.print("{s}.uv = try uv.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 if (sub.hasNormal) {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.normal = try normal.instance(allocator),\n", .{soa_return_prefix orelse ""});
+                    const line = try gpa.print("{s}.normal = try normal.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
                 {
-                    const line = try std.fmt.allocPrint(gpa, "{s}.indices = try indices.instance(allocator),\n", .{soa_return_prefix orelse ""});
+                    const line = try gpa.print("{s}.indices = try indices.instance(allocator),\n", .{soa_return_prefix orelse ""});
                     defer gpa.free(line);
                     try inner.appendSlice(gpa, line);
                 }
@@ -1040,27 +1040,27 @@ pub fn ObjBinaryDescriptor(comptime Scalar: type) type {
             const fun_prefix = try text_utils.repeat(gpa, " ", ((depth + 4) * spaces_per_depth));
             defer if (fun_prefix) |p| gpa.free(p);
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}position.unload(allocator);\n", .{fun_prefix orelse ""});
+                const line = try gpa.print("{s}position.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasColor) {
-                const line = try std.fmt.allocPrint(gpa, "{s}color.unload(allocator);\n", .{fun_prefix orelse ""});
+                const line = try gpa.print("{s}color.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasUV) {
-                const line = try std.fmt.allocPrint(gpa, "{s}uv.unload(allocator);\n", .{fun_prefix orelse ""});
+                const line = try gpa.print("{s}uv.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             if (sub.hasNormal) {
-                const line = try std.fmt.allocPrint(gpa, "{s}normal.unload(allocator);\n", .{fun_prefix orelse ""});
+                const line = try gpa.print("{s}normal.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
             {
-                const line = try std.fmt.allocPrint(gpa, "{s}indices.unload(allocator);\n", .{fun_prefix orelse ""});
+                const line = try gpa.print("{s}indices.unload(allocator);\n", .{fun_prefix orelse ""});
                 defer gpa.free(line);
                 try inner.appendSlice(gpa, line);
             }
