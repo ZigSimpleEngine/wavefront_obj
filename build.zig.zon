@@ -2,7 +2,7 @@
     .name = .wavefront_obj,
     .version = "0.0.0",
     .fingerprint = 0xf24a23dd18f0a47b,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .assets_manager = .{ .path = "../assets_manager" },
     },

@@ -18,7 +18,7 @@ pub const Options = struct {
     /// Target platform for the compiled module, resolved from standard build options in `initFromOptions` and applied in `getModule` and `createModuleOwn`.
     target: ?std.Build.ResolvedTarget = null,
     /// Optimization mode for the compiled module, resolved from standard build options in `initFromOptions` and applied in `getModule` and `createModuleOwn`.
-    optimize: ?std.builtin.OptimizeMode = null,
+    optimize: ?std.lang.Optimize = null,
     /// Shared `assets_manager` module instance. When `null`, it is resolved
     /// via `b.dependency("assets_manager", ...)`. Pass an explicit module
     /// from the final project to guarantee a single `assets_manager`
